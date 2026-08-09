@@ -1136,6 +1136,24 @@ def infer_protocol_value(
     return "unknown"
 
 
+# Gemini 3 rejects replayed functionCall parts without the model's thought
+# signature, and histories converted from the OpenAI format have usually lost
+# it. Google's escape hatch for such clients is this placeholder, which passes
+# signature validation on every signature-aware model (verified: required and
+# accepted on gemini-3.5/flash-latest, tolerated on gemini-2.5; arbitrary
+# values are rejected as "Corrupted thought signature"). A real signature on
+# the tool call always wins.
+GEMINI_THOUGHT_SIGNATURE_BYPASS = "context_engineering_is_the_way_to_go"
+
+
+def _gemini_thought_signature_for_tool_call(tool_call: dict) -> str:
+    sig = tool_call.get("thought_signature")
+    if not sig:
+        provider_fields = tool_call.get("provider_specific_fields") or {}
+        sig = provider_fields.get("thought_signature")
+    return sig or GEMINI_THOUGHT_SIGNATURE_BYPASS
+
+
 def _gemini_tool_call_invoke_helper(
     function_call_params: ChatCompletionToolCallFunctionChunk,
 ) -> Optional[VertexFunctionCall]:
@@ -1211,9 +1229,13 @@ def convert_to_gemini_tool_call_invoke(
                         function_call_params=tool["function"]
                     )
                     if gemini_function_call is not None:
-                        _parts_list.append(
-                            VertexPartType(function_call=gemini_function_call)
+                        _invoke_part = VertexPartType(
+                            function_call=gemini_function_call
                         )
+                        _invoke_part[
+                            "thoughtSignature"
+                        ] = _gemini_thought_signature_for_tool_call(dict(tool))
+                        _parts_list.append(_invoke_part)
                     else:  # don't silently drop params. Make it clear to user what's happening.
                         raise Exception(
                             "function_call missing. Received tool call with 'type': 'function'. No function call in argument - {}".format(
@@ -1225,7 +1247,9 @@ def convert_to_gemini_tool_call_invoke(
                 function_call_params=function_call
             )
             if gemini_function_call is not None:
-                _parts_list.append(VertexPartType(function_call=gemini_function_call))
+                _invoke_part = VertexPartType(function_call=gemini_function_call)
+                _invoke_part["thoughtSignature"] = GEMINI_THOUGHT_SIGNATURE_BYPASS
+                _parts_list.append(_invoke_part)
             else:  # don't silently drop params. Make it clear to user what's happening.
                 raise Exception(
                     "function_call missing. Received tool call with 'type': 'function'. No function call in argument - {}".format(
